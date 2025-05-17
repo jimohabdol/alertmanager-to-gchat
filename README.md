@@ -8,7 +8,7 @@ A **Golang application** that receives **Prometheus Alertmanager** webhook notif
 - Includes labels, annotations, and links to **Prometheus & Alertmanager**.
 
 ## **Prerequisites**
-- **Go 1.16 or higher**
+- **Go 1.24.1 or higher**
 - A **Google Chat webhook URL**
 - Configured **Alertmanager** to send webhooks.
 
