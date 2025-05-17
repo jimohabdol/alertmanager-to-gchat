@@ -1,0 +1,8 @@
+[server]
+listen_addr = ":7000"
+
+[google_chat]
+webhook_url = "https://chat.googleapis.com/v1/spaces/AAAAA/messages?key=XXXXX&token=YYYYY"
+
+[logging]
+level = "info"
