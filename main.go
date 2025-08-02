@@ -1,38 +1,21 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/BurntSushi/toml"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
-
-type Config struct {
-	Server     ServerConfig     `toml:"server"`
-	GoogleChat GoogleChatConfig `toml:"google_chat"`
-	Logging    LoggingConfig    `toml:"logging"`
-}
-
-type ServerConfig struct {
-	ListenAddr string `toml:"listen_addr"`
-}
-
-type GoogleChatConfig struct {
-	WebhookURL string `toml:"webhook_url"`
-}
-
-type LoggingConfig struct {
-	Level string `toml:"level"`
-}
 
 var (
 	configPath     = flag.String("config", "config.toml", "Path to configuration file")
@@ -154,48 +137,58 @@ type OpenLink struct {
 func main() {
 	flag.Parse()
 
-	if err := loadConfig(*configPath); err != nil {
+	cfg, err := LoadConfig(*configPath)
+	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+	config = cfg
 
 	setupLogger()
 
-	if config.GoogleChat.WebhookURL == "" {
-		logger.Error("Google Chat webhook URL is required in config")
+	if err := config.Validate(); err != nil {
+		logger.Error("Configuration validation failed: %v", err)
 		os.Exit(1)
 	}
 
-	http.HandleFunc("/webhook", handleWebhook)
-	http.HandleFunc("/health", healthCheckHandler)
+	provider := &GoogleChatProvider{WebhookURL: config.GoogleChat.WebhookURL}
 
-	logger.Info("Starting AlertManager to Google Chat webhook server on %s", config.Server.ListenAddr)
-	logger.Error("Server terminated: %v", http.ListenAndServe(config.Server.ListenAddr, nil))
-}
-
-func loadConfig(path string) error {
-	config = Config{
-		Server: ServerConfig{
-			ListenAddr: ":7000",
-		},
-		Logging: LoggingConfig{
-			Level: LogLevelInfo,
-		},
+	server := &http.Server{
+		Addr:         config.Server.ListenAddr,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %v", err)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/webhook", func(w http.ResponseWriter, r *http.Request) {
+		handleWebhookWithProvider(w, r, provider)
+	})
+	mux.HandleFunc("/health", healthCheckHandler)
+	mux.Handle("/metrics", promhttp.Handler())
+
+	server.Handler = mux
+
+	go func() {
+		logger.Info("Starting AlertManager to Google Chat webhook server on %s", config.Server.ListenAddr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("Server error: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	logger.Info("Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		logger.Error("Server forced to shutdown: %v", err)
 	}
 
-	if _, err := os.Stat(absPath); os.IsNotExist(err) {
-		return fmt.Errorf("config file not found at %s", absPath)
-	}
-
-	if _, err := toml.DecodeFile(absPath, &config); err != nil {
-		return fmt.Errorf("failed to decode config file: %v", err)
-	}
-
-	return nil
+	logger.Info("Server exited")
 }
 
 func setupLogger() {
@@ -211,11 +204,19 @@ func setupLogger() {
 }
 
 func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "OK")
+
+	response := map[string]interface{}{
+		"status":    "healthy",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"version":   "1.0.0",
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
 
-func handleWebhook(w http.ResponseWriter, r *http.Request) {
+func handleWebhookWithProvider(w http.ResponseWriter, r *http.Request, provider Provider) {
 	reqID := fmt.Sprintf("req-%d", time.Now().UnixNano())
 	logger.Info("[%s] Received webhook request from %s", reqID, r.RemoteAddr)
 
@@ -225,13 +226,26 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := ioutil.ReadAll(r.Body)
+	// Validation of content type
+	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		logger.Error("[%s] Invalid content type: %s", reqID, r.Header.Get("Content-Type"))
+		http.Error(w, "Content-Type must be application/json", http.StatusBadRequest)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		logger.Error("[%s] Error reading request body: %v", reqID, err)
 		http.Error(w, "Error reading request body", http.StatusInternalServerError)
 		return
 	}
 	defer r.Body.Close()
+
+	if len(body) == 0 {
+		logger.Error("[%s] Empty request body", reqID)
+		http.Error(w, "Empty request body", http.StatusBadRequest)
+		return
+	}
 
 	logger.Debug("[%s] Received webhook body: %s", reqID, string(body))
 
@@ -242,16 +256,25 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate payload
+	if err := validateAlertPayload(&alertPayload); err != nil {
+		logger.Error("[%s] Invalid alert payload: %v", reqID, err)
+		http.Error(w, "Invalid alert payload", http.StatusBadRequest)
+		return
+	}
+
 	logger.Info("[%s] Received %d alerts with status: %s, alertname: %s",
 		reqID,
 		len(alertPayload.Alerts),
 		alertPayload.Status,
 		getAlertName(&alertPayload))
 
+	alertsReceived.WithLabelValues(alertPayload.Status).Inc()
+
 	chatMessage := convertToGoogleChatFormat(&alertPayload)
 
 	logger.Info("[%s] Sending alert to Google Chat", reqID)
-	if err := sendToGoogleChat(chatMessage, reqID); err != nil {
+	if err := provider.Send(chatMessage, reqID); err != nil {
 		logger.Error("[%s] Error sending to Google Chat: %v", reqID, err)
 		http.Error(w, "Error sending to Google Chat", http.StatusInternalServerError)
 		return
@@ -260,6 +283,27 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	logger.Info("[%s] Alert processed successfully", reqID)
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "Alert processed successfully")
+}
+
+func validateAlertPayload(payload *AlertManagerPayload) error {
+	if payload.Status == "" {
+		return fmt.Errorf("status is required")
+	}
+
+	if len(payload.Alerts) == 0 {
+		return fmt.Errorf("at least one alert is required")
+	}
+
+	for i, alert := range payload.Alerts {
+		if alert.Status == "" {
+			return fmt.Errorf("alert %d status is required", i)
+		}
+		if len(alert.Labels) == 0 {
+			return fmt.Errorf("alert %d must have at least one label", i)
+		}
+	}
+
+	return nil
 }
 
 func convertToGoogleChatFormat(alertPayload *AlertManagerPayload) *GoogleChatMessage {
@@ -277,6 +321,24 @@ func convertToGoogleChatFormat(alertPayload *AlertManagerPayload) *GoogleChatMes
 		Sections: []CardSection{},
 	}
 
+	summarySection := createSummarySection(alertPayload)
+	card.Sections = append(card.Sections, summarySection)
+
+	for i, alert := range alertPayload.Alerts {
+		alertSection := createAlertSection(i+1, alert)
+		card.Sections = append(card.Sections, alertSection)
+	}
+
+	if alertPayload.ExternalURL != "" {
+		externalSection := createExternalURLSection(alertPayload.ExternalURL)
+		card.Sections = append(card.Sections, externalSection)
+	}
+
+	message.Cards = append(message.Cards, card)
+	return message
+}
+
+func createSummarySection(alertPayload *AlertManagerPayload) CardSection {
 	summarySection := CardSection{
 		Header: "Summary",
 		Widgets: []Widget{
@@ -291,120 +353,115 @@ func convertToGoogleChatFormat(alertPayload *AlertManagerPayload) *GoogleChatMes
 	}
 
 	if len(alertPayload.CommonLabels) > 0 {
-		var labelsContent strings.Builder
-		for k, v := range alertPayload.CommonLabels {
-			labelsContent.WriteString(fmt.Sprintf("• %s: %s\n", k, v))
-		}
-
+		labelsContent := formatMapAsList(alertPayload.CommonLabels)
 		summarySection.Widgets = append(summarySection.Widgets, Widget{
 			KeyValue: &KeyValue{
 				TopLabel:         "Common Labels",
-				Content:          labelsContent.String(),
+				Content:          labelsContent,
 				ContentMultiline: true,
 			},
 		})
 	}
 
 	if len(alertPayload.CommonAnnotations) > 0 {
-		var annotationsContent strings.Builder
-		for k, v := range alertPayload.CommonAnnotations {
-			annotationsContent.WriteString(fmt.Sprintf("• %s: %s\n", k, v))
-		}
-
+		annotationsContent := formatMapAsList(alertPayload.CommonAnnotations)
 		summarySection.Widgets = append(summarySection.Widgets, Widget{
 			KeyValue: &KeyValue{
 				TopLabel:         "Common Annotations",
-				Content:          annotationsContent.String(),
+				Content:          annotationsContent,
 				ContentMultiline: true,
 			},
 		})
 	}
 
-	card.Sections = append(card.Sections, summarySection)
+	return summarySection
+}
 
-	for i, alert := range alertPayload.Alerts {
-		alertSection := CardSection{
-			Header:  fmt.Sprintf("Alert #%d", i+1),
-			Widgets: []Widget{},
-		}
+func createAlertSection(alertIndex int, alert Alert) CardSection {
+	alertSection := CardSection{
+		Header:  fmt.Sprintf("Alert #%d", alertIndex),
+		Widgets: []Widget{},
+	}
 
-		if description, ok := alert.Annotations["description"]; ok {
-			alertSection.Widgets = append(alertSection.Widgets, Widget{
-				TextParagraph: &TextParagraph{
-					Text: description,
-				},
-			})
-		} else if summary, ok := alert.Annotations["summary"]; ok {
-			alertSection.Widgets = append(alertSection.Widgets, Widget{
-				TextParagraph: &TextParagraph{
-					Text: summary,
-				},
-			})
-		}
+	if description, ok := alert.Annotations["description"]; ok {
+		alertSection.Widgets = append(alertSection.Widgets, Widget{
+			TextParagraph: &TextParagraph{
+				Text: description,
+			},
+		})
+	} else if summary, ok := alert.Annotations["summary"]; ok {
+		alertSection.Widgets = append(alertSection.Widgets, Widget{
+			TextParagraph: &TextParagraph{
+				Text: summary,
+			},
+		})
+	}
 
-		var detailsContent strings.Builder
-		for k, v := range alert.Labels {
-			detailsContent.WriteString(fmt.Sprintf("• %s: %s\n", k, v))
-		}
-
+	if len(alert.Labels) > 0 {
+		labelsContent := formatMapAsList(alert.Labels)
 		alertSection.Widgets = append(alertSection.Widgets, Widget{
 			KeyValue: &KeyValue{
 				TopLabel:         "Labels",
-				Content:          detailsContent.String(),
+				Content:          labelsContent,
 				ContentMultiline: true,
 			},
 		})
+	}
 
+	alertSection.Widgets = append(alertSection.Widgets, Widget{
+		KeyValue: &KeyValue{
+			TopLabel: "Started",
+			Content:  alert.StartsAt.Format(time.RFC3339),
+		},
+	})
+
+	if alert.GeneratorURL != "" {
 		alertSection.Widgets = append(alertSection.Widgets, Widget{
-			KeyValue: &KeyValue{
-				TopLabel: "Started",
-				Content:  alert.StartsAt.Format(time.RFC3339),
+			Buttons: []Button{
+				{
+					TextButton: &TextButton{
+						Text: "View in Prometheus",
+						OnClick: &OnClickAction{
+							OpenLink: &OpenLink{
+								URL: alert.GeneratorURL,
+							},
+						},
+					},
+				},
 			},
 		})
+	}
 
-		if alert.GeneratorURL != "" {
-			alertSection.Widgets = append(alertSection.Widgets, Widget{
+	return alertSection
+}
+
+func createExternalURLSection(externalURL string) CardSection {
+	return CardSection{
+		Widgets: []Widget{
+			{
 				Buttons: []Button{
 					{
 						TextButton: &TextButton{
-							Text: "View in Prometheus",
+							Text: "View in AlertManager",
 							OnClick: &OnClickAction{
 								OpenLink: &OpenLink{
-									URL: alert.GeneratorURL,
-								},
-							},
-						},
-					},
-				},
-			})
-		}
-
-		card.Sections = append(card.Sections, alertSection)
-	}
-
-	if alertPayload.ExternalURL != "" {
-		card.Sections = append(card.Sections, CardSection{
-			Widgets: []Widget{
-				{
-					Buttons: []Button{
-						{
-							TextButton: &TextButton{
-								Text: "View in AlertManager",
-								OnClick: &OnClickAction{
-									OpenLink: &OpenLink{
-										URL: alertPayload.ExternalURL,
-									},
+									URL: externalURL,
 								},
 							},
 						},
 					},
 				},
 			},
-		})
+		},
 	}
+}
 
-	message.Cards = append(message.Cards, card)
-	return message
+func formatMapAsList(data map[string]string) string {
+	var content strings.Builder
+	for k, v := range data {
+		content.WriteString(fmt.Sprintf("• %s: %s\n", k, v))
+	}
+	return content.String()
 }
 
 func getAlertName(alertPayload *AlertManagerPayload) string {
@@ -424,42 +481,8 @@ func getStatusIcon(status string) string {
 	case "firing":
 		return "STAR"
 	case "resolved":
-		return "CHECK"
+		return "EMAIL"
 	default:
 		return "DESCRIPTION"
 	}
-}
-
-func sendToGoogleChat(message *GoogleChatMessage, reqID string) error {
-	payload, err := json.Marshal(message)
-	if err != nil {
-		return fmt.Errorf("error marshaling Google Chat message: %v", err)
-	}
-
-	logger.Debug("[%s] Google Chat payload: %s", reqID, string(payload))
-
-	client := http.Client{Timeout: defaultTimeout}
-	req, err := http.NewRequest(http.MethodPost, config.GoogleChat.WebhookURL, bytes.NewBuffer(payload))
-	if err != nil {
-		return fmt.Errorf("error creating request: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	startTime := time.Now()
-	resp, err := client.Do(req)
-	elapsed := time.Since(startTime)
-
-	if err != nil {
-		return fmt.Errorf("error sending request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		bodyBytes, _ := ioutil.ReadAll(resp.Body)
-		logger.Error("[%s] Google Chat API returned error status: %d, response: %s", reqID, resp.StatusCode, string(bodyBytes))
-		return fmt.Errorf("received non-success status code %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	logger.Info("[%s] Successfully sent message to Google Chat (status: %d, elapsed: %s)", reqID, resp.StatusCode, elapsed)
-	return nil
 }

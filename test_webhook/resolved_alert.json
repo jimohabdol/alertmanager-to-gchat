@@ -1,0 +1,41 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"HighCPUUsage\"}",
+  "truncatedAlerts": 0,
+  "status": "resolved",
+  "receiver": "google-chat",
+  "groupLabels": {
+    "alertname": "HighCPUUsage"
+  },
+  "commonLabels": {
+    "alertname": "HighCPUUsage",
+    "severity": "warning",
+    "team": "platform"
+  },
+  "commonAnnotations": {
+    "description": "CPU usage has returned to normal levels",
+    "summary": "High CPU utilization resolved"
+  },
+  "externalURL": "http://alertmanager:9093/#/alerts?receiver=google-chat",
+  "alerts": [
+    {
+      "status": "resolved",
+      "labels": {
+        "alertname": "HighCPUUsage",
+        "instance": "web-server-01",
+        "job": "node-exporter",
+        "severity": "warning",
+        "team": "platform"
+      },
+      "annotations": {
+        "description": "CPU usage has returned to normal levels on web-server-01",
+        "summary": "High CPU utilization resolved on web-server-01",
+        "value": "45.2%"
+      },
+      "startsAt": "2024-01-15T10:30:00.000Z",
+      "endsAt": "2024-01-15T10:45:00.000Z",
+      "generatorURL": "http://prometheus:9090/graph?g0.expr=100+%2A+%281+-+avg+by%28instance%29+%28irate%28node_cpu_seconds_total%7Bmode%3D%22idle%22%7D%5B5m%5D%29%29%29+%3E+80&g0.tab=1",
+      "fingerprint": "a1b2c3d4e5f6"
+    }
+  ]
+} 

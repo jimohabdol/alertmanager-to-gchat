@@ -1,0 +1,60 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"HighCPUUsage\"}",
+  "truncatedAlerts": 0,
+  "status": "firing",
+  "receiver": "google-chat",
+  "groupLabels": {
+    "alertname": "HighCPUUsage"
+  },
+  "commonLabels": {
+    "alertname": "HighCPUUsage",
+    "severity": "warning",
+    "team": "platform"
+  },
+  "commonAnnotations": {
+    "description": "CPU usage is above 80% for more than 5 minutes",
+    "summary": "High CPU utilization detected"
+  },
+  "externalURL": "http://alertmanager:9093/#/alerts?receiver=google-chat",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighCPUUsage",
+        "instance": "web-server-01",
+        "job": "node-exporter",
+        "severity": "warning",
+        "team": "platform"
+      },
+      "annotations": {
+        "description": "CPU usage is above 80% for more than 5 minutes on web-server-01",
+        "summary": "High CPU utilization on web-server-01",
+        "value": "85.2%"
+      },
+      "startsAt": "2024-01-15T10:30:00.000Z",
+      "endsAt": "0001-01-01T00:00:00.000Z",
+      "generatorURL": "http://prometheus:9090/graph?g0.expr=100+%2A+%281+-+avg+by%28instance%29+%28irate%28node_cpu_seconds_total%7Bmode%3D%22idle%22%7D%5B5m%5D%29%29%29+%3E+80&g0.tab=1",
+      "fingerprint": "a1b2c3d4e5f6"
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighCPUUsage",
+        "instance": "web-server-02",
+        "job": "node-exporter",
+        "severity": "warning",
+        "team": "platform"
+      },
+      "annotations": {
+        "description": "CPU usage is above 80% for more than 5 minutes on web-server-02",
+        "summary": "High CPU utilization on web-server-02",
+        "value": "82.1%"
+      },
+      "startsAt": "2024-01-15T10:32:00.000Z",
+      "endsAt": "0001-01-01T00:00:00.000Z",
+      "generatorURL": "http://prometheus:9090/graph?g0.expr=100+%2A+%281+-+avg+by%28instance%29+%28irate%28node_cpu_seconds_total%7Bmode%3D%22idle%22%7D%5B5m%5D%29%29%29+%3E+80&g0.tab=1",
+      "fingerprint": "b2c3d4e5f6a1"
+    }
+  ]
+} 
