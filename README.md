@@ -1,13 +1,6 @@
 # AlertManager to Google Chat Webhook Bridge
 
-A **production-ready Golang application** that receives **Prometheus AlertManager** webhook notifications and forwards alerts to **Google Chat** with rich, formatted messages.
-
-## **Features**
-- ✅ **Production Ready**: Graceful shutdown, proper error handling, and comprehensive logging
-- ✅ **Security**: HTTPS validation, non-root container user, input validation
-- ✅ **Monitoring**: Prometheus metrics, health checks, structured logging
-- ✅ **Reliability**: Retry logic, timeout handling, request validation
-- ✅ **Maintainability**: Clean code structure, comprehensive tests, DRY principles
+A Golang application** that receives **Prometheus AlertManager** webhook notifications and forwards alerts to **Google Chat** with rich, formatted messages.
 
 ## **Prerequisites**
 - **Go 1.24.1 or higher**
@@ -19,7 +12,7 @@ A **production-ready Golang application** that receives **Prometheus AlertManage
 
 ### Local Development
 ```bash
-git clone <repository-url>
+git clone https://github.com/jimohabdol/alertmanager-to-gchat.git
 cd alertmanager-to-gchat
 go mod tidy
 go build -o alertmanager-to-gchat
